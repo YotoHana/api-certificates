@@ -33,6 +33,9 @@ type MyClaims struct {
 
 type DataGrants struct {
 	Grants []Grant `json:"grants"`
+	FiltersMapping FiltersMapping `json:"filters_mapping"`
+	FiltersOrders []string `json:"filter_order"`
+	Meta Meta `json:"meta"`
 }
 
 type Grant struct {
@@ -48,6 +51,66 @@ type FilterValues struct {
 	Amount             int   `json:"amount" db:"amount"`
 	LegalForm          []int `json:"legal_form" db:"legal_forms"`
 	Age                int   `json:"age" db:"age"`
+}
+
+type FiltersMapping struct {
+	Age Age `json:"age"`
+	ProjectDirection ProjectDirection `json:"project_direction"`
+	LegalForm LegalForm `json:"legal_form"`
+	CuttingOffCriteria CuttingOffCriteria `json:"cutting_off_criteria"`
+	Amount Amount `json:"amount"`
+}
+
+type Age struct {
+	Title string `json:"title"`
+	Mapping MappingEmpty `json:"mapping,omitempty"`
+}
+
+type ProjectDirection struct {
+	Title string `json:"title"`
+	Mapping Mapping `json:"mapping"`
+}
+
+type LegalForm struct {
+	Title string `json:"title"`
+	Mapping Mapping `json:"mapping"`
+}
+
+type CuttingOffCriteria struct{
+	Title string `json:"title"`
+	Mapping Mapping `json:"mapping"`
+}
+
+type Amount struct {
+	Title string `json:"title"`
+	Mapping MappingEmpty `json:"mapping"`
+}
+
+type MappingEmpty struct {
+	Empty string `json:"empty,omitempty"`
+}
+
+type Mapping struct {
+	Zero Zero `json:"0"`
+	Two Two `json:"1"`
+	Three Three `json:"2"`
+}
+
+type Zero struct {
+	Title string `json:"title"`
+}
+
+type Two struct {
+	Title string `json:"title"`
+}
+
+type Three struct {
+	Title string `json:"title"`
+}
+
+type Meta struct {
+	CurrentPage int `json:"current_page"`
+	TotalPages int `json:"total_pages"`
 }
 
 var mySigningKey = []byte("secret-key")
@@ -156,39 +219,88 @@ func Grants (w http.ResponseWriter, r *http.Request) {
 	}
 	defer conn.Close(ctx)
 
-	query := "SELECT id, title, source_url, project_directions, amount, legal_forms, age, cutting_off_criterea FROM grants WHERE id = $1"
-    var grant Grant
+	query := "select age ->> 'title', amount ->> 'title' from filters_mapping"
+	var age Age
+	var amount Amount
+	err = conn.QueryRow(ctx, query).Scan(&age.Title, &amount.Title)
+	if err != nil {
+		log.Fatalf("Error queryrow: %v", err)
+	}
+	ageS := Age{
+		Title: age.Title,
+	}
+	amountS := Amount{
+		Title: amount.Title,
+	}
 
-    // Выполнение запроса с привязкой параметра id
-    err = conn.QueryRow(context.Background(), query, 1).Scan(
-        &grant.ID,
-        &grant.Title,
-        &grant.SourceURL,
-        // Здесь нужно будет преобразовать или десериализовать значения, если они JSON
-        &grant.FilterValues.ProjectDirection, // предполагаем, что это массив
-        &grant.FilterValues.Amount,
-        &grant.FilterValues.LegalForm, // если это массив
-        &grant.FilterValues.Age,
-        &grant.FilterValues.CuttingOffCriteria, // если это массив
-    )
-    
-    if err != nil {
-        log.Fatal(err)
+	query = "select meta, filters_order from meta"
+	var meta Meta
+	var filter DataGrants
+	err = conn.QueryRow(ctx, query).Scan(&meta, &filter.FiltersOrders)
+	if err != nil {
+		log.Fatalf("error queryrow: %v", err)
+	}
+
+
+	var projDir ProjectDirection
+	var legalForm LegalForm
+	var cutOfCrit CuttingOffCriteria
+	query = "select project_direction, legal_form, cutting_off_criteria from filters_mapping"
+	err = conn.QueryRow(ctx, query).Scan(&projDir, &legalForm, &cutOfCrit)
+	if err != nil {
+		log.Fatalf("Error queryrow: %v", err)
+	}
+
+	filterMapping := FiltersMapping{
+		Age: ageS,
+		Amount: amountS,
+		ProjectDirection: projDir,
+		LegalForm: legalForm,
+		CuttingOffCriteria: cutOfCrit,
+	}
+
+	dataGrants := DataGrants{
+		Grants: nil,
+		FiltersMapping: filterMapping,
+		Meta: meta,
+		FiltersOrders: filter.FiltersOrders,
+	}
+
+	query = "SELECT * FROM grants"
+
+    rows, err := conn.Query(ctx, query)
+	if err != nil {
+		log.Fatalf("Error query: %v",err)
+	}
+	defer rows.Close()
+
+	var grant Grant
+	for rows.Next() {
+		rows.Scan(
+			&grant.ID,
+			&grant.Title,
+			&grant.SourceURL,
+			&grant.FilterValues.ProjectDirection,
+			&grant.FilterValues.Amount,
+			&grant.FilterValues.LegalForm,
+			&grant.FilterValues.Age,
+			&grant.FilterValues.CuttingOffCriteria,
+		)
+			dataGrants.Grants = append(dataGrants.Grants, grant)
+	}
+
+	if rows.Err() != nil {
+        log.Fatalf("error rows query: %v",err)
     }
 
-    // Создание объекта DataGrants
-    dataGrants := DataGrants{
-        Grants: []Grant{grant},
-    }
-
-    // Преобразование результата в JSON
     jsonResult, err := json.Marshal(dataGrants)
     if err != nil {
         log.Fatal(err)
     }
 
-    // Вывод JSON
     fmt.Println(string(jsonResult))
 
-	
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonResult)
+
 }
