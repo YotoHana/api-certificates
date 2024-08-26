@@ -1,120 +1,30 @@
 package handlers
 
 import (
+	config "api-certificates/configs"
+	"api-certificates/structs"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/joho/godotenv"
 )
 
-type Data struct {
-	Login    string `json:"login"`
-	Password string `json:"password"`
+func init() {
+	if err := godotenv.Load(); err != nil {
+		log.Print("No .env file found")
+	}
 }
 
-type Response struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
-type Token struct {
-	Token string `json:"token"`
-}
-
-type MyClaims struct {
-	jwt.RegisteredClaims
-	Id int `json:"id"`
-	Login string `json:"login"`
-}
-
-type DataGrants struct {
-	Grants []Grant `json:"grants"`
-	FiltersMapping FiltersMapping `json:"filters_mapping"`
-	FiltersOrders []string `json:"filter_order"`
-	Meta Meta `json:"meta"`
-}
-
-type Grant struct {
-	ID           int          `json:"id" db:"id"`
-	Title        string       `json:"title" db:"title"`
-	SourceURL    string       `json:"source_url" db:"source_url"`
-	FilterValues FilterValues `json:"filter_values"`
-}
-
-type FilterValues struct {
-	CuttingOffCriteria []int `json:"cutting_off_criteria" db:"cutting_off_criterea"`
-	ProjectDirection   []int `json:"project_direction" db:"project_directions"`
-	Amount             int   `json:"amount" db:"amount"`
-	LegalForm          []int `json:"legal_form" db:"legal_forms"`
-	Age                int   `json:"age" db:"age"`
-}
-
-type FiltersMapping struct {
-	Age Age `json:"age"`
-	ProjectDirection ProjectDirection `json:"project_direction"`
-	LegalForm LegalForm `json:"legal_form"`
-	CuttingOffCriteria CuttingOffCriteria `json:"cutting_off_criteria"`
-	Amount Amount `json:"amount"`
-}
-
-type Age struct {
-	Title string `json:"title"`
-	Mapping MappingEmpty `json:"mapping,omitempty"`
-}
-
-type ProjectDirection struct {
-	Title string `json:"title"`
-	Mapping Mapping `json:"mapping"`
-}
-
-type LegalForm struct {
-	Title string `json:"title"`
-	Mapping Mapping `json:"mapping"`
-}
-
-type CuttingOffCriteria struct{
-	Title string `json:"title"`
-	Mapping Mapping `json:"mapping"`
-}
-
-type Amount struct {
-	Title string `json:"title"`
-	Mapping MappingEmpty `json:"mapping"`
-}
-
-type MappingEmpty struct {
-	Empty string `json:"empty,omitempty"`
-}
-
-type Mapping struct {
-	Zero Zero `json:"0"`
-	Two Two `json:"1"`
-	Three Three `json:"2"`
-}
-
-type Zero struct {
-	Title string `json:"title"`
-}
-
-type Two struct {
-	Title string `json:"title"`
-}
-
-type Three struct {
-	Title string `json:"title"`
-}
-
-type Meta struct {
-	CurrentPage int `json:"current_page"`
-	TotalPages int `json:"total_pages"`
-}
-
-var mySigningKey = []byte("secret-key")
+var conf = config.New()
 var ctx = context.Background()
+var secretKey = conf.SecretKey
+var dbConn = conf.DbConn
 
 func Login(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "POST" {
@@ -122,14 +32,14 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var data Data
+	var data structs.Data
 	err := json.NewDecoder(r.Body).Decode(&data)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	conn, err := pgx.Connect(ctx,"postgres://adminfront:123@localhost:5432/adminfront")
+	conn, err := pgx.Connect(ctx, dbConn)
 	if err != nil {
 		log.Fatalf("Unable to connect to database : %v\n", err)
 	}
@@ -150,7 +60,7 @@ func Login(w http.ResponseWriter, r *http.Request) {
 			log.Fatalf("QueryRow failed: %v\n", err)
 		}
 
-		claims := MyClaims{
+		claims := structs.MyClaims{
 			RegisteredClaims: jwt.RegisteredClaims{},
 			Login: data.Login,
 			Id: id,
@@ -158,12 +68,12 @@ func Login(w http.ResponseWriter, r *http.Request) {
 
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
-		StrToken, err := token.SignedString(mySigningKey)
+		StrToken, err := token.SignedString(secretKey)
 		if err != nil {
 			log.Fatalf("Произошла ошибка %v\n", err)
 		}
 
-		resp := Token{Token: StrToken}
+		resp := structs.Token{Token: StrToken}
 		log.Println("Login data is correct.")
 		jsonData, err := json.Marshal(resp)
 		if err != nil {
@@ -191,10 +101,10 @@ func Check(w http.ResponseWriter, r *http.Request) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("Неожиданный метод подписи: %v", t.Header["alg"])
 		}
-		return mySigningKey, nil
+		return secretKey, nil
 	}
 
-	claims := &MyClaims{}
+	claims := &structs.MyClaims{}
 	parsedToken, err := jwt.ParseWithClaims(token, claims, keyFunc)
 	if err != nil {
 		log.Fatalf("Ошибка разбора check: %v", err)
@@ -213,45 +123,45 @@ func Grants (w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	conn, err := pgx.Connect(ctx,"postgres://adminfront:123@localhost:5432/adminfront")
+	conn, err := pgx.Connect(ctx, dbConn)
 	if err != nil {
 		log.Fatalf("Unable to connect to database : %v\n", err)
 	}
 	defer conn.Close(ctx)
 
 	query := "select age ->> 'title', amount ->> 'title' from filters_mapping"
-	var age Age
-	var amount Amount
+	var age structs.Age
+	var amount structs.Amount
 	err = conn.QueryRow(ctx, query).Scan(&age.Title, &amount.Title)
 	if err != nil {
 		log.Fatalf("Error queryrow: %v", err)
 	}
-	ageS := Age{
+	ageS := structs.Age{
 		Title: age.Title,
 	}
-	amountS := Amount{
+	amountS := structs.Amount{
 		Title: amount.Title,
 	}
 
 	query = "select meta, filters_order from meta"
-	var meta Meta
-	var filter DataGrants
+	var meta structs.Meta
+	var filter structs.DataGrants
 	err = conn.QueryRow(ctx, query).Scan(&meta, &filter.FiltersOrders)
 	if err != nil {
 		log.Fatalf("error queryrow: %v", err)
 	}
 
 
-	var projDir ProjectDirection
-	var legalForm LegalForm
-	var cutOfCrit CuttingOffCriteria
+	var projDir structs.ProjectDirection
+	var legalForm structs.LegalForm
+	var cutOfCrit structs.CuttingOffCriteria
 	query = "select project_direction, legal_form, cutting_off_criteria from filters_mapping"
 	err = conn.QueryRow(ctx, query).Scan(&projDir, &legalForm, &cutOfCrit)
 	if err != nil {
 		log.Fatalf("Error queryrow: %v", err)
 	}
 
-	filterMapping := FiltersMapping{
+	filterMapping := structs.FiltersMapping{
 		Age: ageS,
 		Amount: amountS,
 		ProjectDirection: projDir,
@@ -259,7 +169,7 @@ func Grants (w http.ResponseWriter, r *http.Request) {
 		CuttingOffCriteria: cutOfCrit,
 	}
 
-	dataGrants := DataGrants{
+	dataGrants := structs.DataGrants{
 		Grants: nil,
 		FiltersMapping: filterMapping,
 		Meta: meta,
@@ -274,7 +184,7 @@ func Grants (w http.ResponseWriter, r *http.Request) {
 	}
 	defer rows.Close()
 
-	var grant Grant
+	var grant structs.GrantItem
 	for rows.Next() {
 		rows.Scan(
 			&grant.ID,
@@ -298,9 +208,114 @@ func Grants (w http.ResponseWriter, r *http.Request) {
         log.Fatal(err)
     }
 
-    fmt.Println(string(jsonResult))
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(jsonResult)
+}
+
+func GrantsId(w http.ResponseWriter, r *http.Request)  {
+	idString := r.PathValue("id")
+	
+	conn, err := pgx.Connect(ctx, dbConn)
+	if err != nil {
+		log.Fatalf("Unable to connect to database : %v\n", err)
+	}
+	defer conn.Close(ctx)
+
+	query := "select * from grants where id = $1"
+	var grant structs.GrantItem
+	err = conn.QueryRow(ctx, query, idString).Scan(
+		&grant.ID,
+			&grant.Title,
+			&grant.SourceURL,
+			&grant.FilterValues.ProjectDirection,
+			&grant.FilterValues.Amount,
+			&grant.FilterValues.LegalForm,
+			&grant.FilterValues.Age,
+			&grant.FilterValues.CuttingOffCriteria,
+	)
+	if err != nil {
+		log.Fatalf("Error with queryRow: %v", err)
+	}
+
+	query = "select age ->> 'title', amount ->> 'title' from filters_mapping"
+	var age structs.Age
+	var amount structs.Amount
+	err = conn.QueryRow(ctx, query).Scan(&age.Title, &amount.Title)
+	if err != nil {
+		log.Fatalf("Error queryrow: %v", err)
+	}
+	ageS := structs.Age{
+		Title: age.Title,
+	}
+	amountS := structs.Amount{
+		Title: amount.Title,
+	}
+
+	query = "select filters_order from meta"
+	var filter structs.DataGrants
+	err = conn.QueryRow(ctx, query).Scan(&filter.FiltersOrders)
+	if err != nil {
+		log.Fatalf("error queryrow: %v", err)
+	}
+
+	var projDir structs.ProjectDirection
+	var legalForm structs.LegalForm
+	var cutOfCrit structs.CuttingOffCriteria
+	query = "select project_direction, legal_form, cutting_off_criteria from filters_mapping"
+	err = conn.QueryRow(ctx, query).Scan(&projDir, &legalForm, &cutOfCrit)
+	if err != nil {
+		log.Fatalf("Error queryrow: %v", err)
+	}
+
+	filterMapping := structs.FiltersMapping{
+		Age: ageS,
+		Amount: amountS,
+		ProjectDirection: projDir,
+		LegalForm: legalForm,
+		CuttingOffCriteria: cutOfCrit,
+	}
+
+	dataGrants := structs.DataGrantItem{
+		Grants: grant,
+		FiltersMapping: filterMapping,
+		FiltersOrders: filter.FiltersOrders,
+	}
+
+	jsonResult, err := json.Marshal(dataGrants)
+	if err != nil {
+		log.Fatalf("Error with marshall: %v", err)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Write(jsonResult)
+}
+
+func GrantsFilters(w http.ResponseWriter, r *http.Request)  {
+	idString := r.PathValue("id")
+	idInt, err := strconv.Atoi(idString)
+	if err != nil {
+		log.Fatalf("Error with strconv %v", err)
+	}
+	
+	var respDataFilters structs.DataFilters
+	err = json.NewDecoder(r.Body).Decode(&respDataFilters)
+	if err != nil {
+		log.Fatalf("Error with decoding JSON: %v", err)
+	}
+	
+	query := "UPDATE grants SET project_directions = $1, amount = $2, legal_forms = $3, age = $4, cutting_off_criterea = $5 where id = $6"
+	conn, err := pgx.Connect(ctx, dbConn)
+	if err != nil {
+		log.Fatalf("Error with database: %v", err)
+	}
+	updateRow, err := conn.Exec(ctx, query, &respDataFilters.Data.ProjectDirection, &respDataFilters.Data.Amount, &respDataFilters.Data.LegalForm, &respDataFilters.Data.Age, &respDataFilters.Data.CuttingOffCriteria, idInt)
+	if err != nil {
+		log.Fatalf("Error with queryRow : %v", err)
+	}
+	if updateRow.RowsAffected() != 1 {
+		log.Fatalf("No row found to updated")
+	}
+
+	w.WriteHeader(http.StatusNoContent)
 
 }
