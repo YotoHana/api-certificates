@@ -3,9 +3,9 @@ package handlers
 import (
 	config "api-certificates/configs"
 	"api-certificates/structs"
+	"api-certificates/token"
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -23,7 +23,6 @@ func init() {
 
 var conf = config.New()
 var ctx = context.Background()
-var secretKey = conf.SecretKey
 var dbConn = conf.DbConn
 
 func Login(w http.ResponseWriter, r *http.Request) {
@@ -41,14 +40,14 @@ func Login(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := pgx.Connect(ctx, dbConn)
 	if err != nil {
-		log.Fatalf("Unable to connect to database : %v\n", err)
+		log.Fatalf("Unable to connect to database: %v\n", err)
 	}
 	defer conn.Close(ctx)
 
 	var password_match bool
 	err = conn.QueryRow(ctx,"SELECT (password = crypt($1, password)) as password_match FROM users WHERE login = $2", data.Password, data.Login).Scan(&password_match)
 	if err != nil {
-		log.Fatalf("QueryRow failed: %v\n", err)
+		log.Fatalf("Error with query: %v\n", err)
 	}
 
 	log.Printf("Password_match: %v", password_match)
@@ -57,28 +56,18 @@ func Login(w http.ResponseWriter, r *http.Request) {
 		var id int
 		err = conn.QueryRow(ctx,"SELECT id FROM users WHERE login = $1", data.Login).Scan(&id)
 		if err != nil {
-			log.Fatalf("QueryRow failed: %v\n", err)
+			log.Fatalf("Error with query: %v\n", err)
 		}
 
-		claims := structs.MyClaims{
+		claims := &structs.MyClaims{
 			RegisteredClaims: jwt.RegisteredClaims{},
-			Login: data.Login,
 			Id: id,
+			Login: data.Login,
 		}
 
-		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-
-		StrToken, err := token.SignedString(secretKey)
-		if err != nil {
-			log.Fatalf("Произошла ошибка %v\n", err)
-		}
-
-		resp := structs.Token{Token: StrToken}
-		log.Println("Login data is correct.")
-		jsonData, err := json.Marshal(resp)
+		jsonData, err := token.New(claims)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -94,33 +83,36 @@ func Check(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	
-	token := r.Header.Get("Authorization")
-	token = strings.TrimPrefix(token, "Bearer ")
+	tokenStr := r.Header.Get("Authorization")
+	tokenStr = strings.TrimPrefix(tokenStr, "Bearer ")
 	
-	keyFunc := func(t *jwt.Token) (interface{}, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("Неожиданный метод подписи: %v", t.Header["alg"])
-		}
-		return secretKey, nil
-	}
-
-	claims := &structs.MyClaims{}
-	parsedToken, err := jwt.ParseWithClaims(token, claims, keyFunc)
+	validToken, err := token.Validate(tokenStr)
 	if err != nil {
-		log.Fatalf("Ошибка разбора check: %v", err)
+		log.Fatal(err)
 	}
-
-	if !parsedToken.Valid {
-		log.Fatalf("Недействительный токен")
+	if !validToken {
+		log.Fatal(err)
 	} else {
 		w.WriteHeader(http.StatusNoContent)
 	}
+	
 }
 
 func Grants (w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
+	}
+
+	tokenStr := r.Header.Get("Authorization")
+	tokenStr = strings.TrimPrefix(tokenStr, "Bearer ")
+	
+	validToken, err := token.Validate(tokenStr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !validToken {
+		log.Fatal(err)
 	}
 	
 	conn, err := pgx.Connect(ctx, dbConn)
@@ -134,7 +126,7 @@ func Grants (w http.ResponseWriter, r *http.Request) {
 	var amount structs.Amount
 	err = conn.QueryRow(ctx, query).Scan(&age.Title, &amount.Title)
 	if err != nil {
-		log.Fatalf("Error queryrow: %v", err)
+		log.Fatalf("Error with query: %v", err)
 	}
 	ageS := structs.Age{
 		Title: age.Title,
@@ -148,7 +140,7 @@ func Grants (w http.ResponseWriter, r *http.Request) {
 	var filter structs.DataGrants
 	err = conn.QueryRow(ctx, query).Scan(&meta, &filter.FiltersOrders)
 	if err != nil {
-		log.Fatalf("error queryrow: %v", err)
+		log.Fatalf("Error with query: %v", err)
 	}
 
 
@@ -158,7 +150,7 @@ func Grants (w http.ResponseWriter, r *http.Request) {
 	query = "select project_direction, legal_form, cutting_off_criteria from filters_mapping"
 	err = conn.QueryRow(ctx, query).Scan(&projDir, &legalForm, &cutOfCrit)
 	if err != nil {
-		log.Fatalf("Error queryrow: %v", err)
+		log.Fatalf("Error with query: %v", err)
 	}
 
 	filterMapping := structs.FiltersMapping{
@@ -180,7 +172,7 @@ func Grants (w http.ResponseWriter, r *http.Request) {
 
     rows, err := conn.Query(ctx, query)
 	if err != nil {
-		log.Fatalf("Error query: %v",err)
+		log.Fatalf("Error with query: %v",err)
 	}
 	defer rows.Close()
 
@@ -200,7 +192,7 @@ func Grants (w http.ResponseWriter, r *http.Request) {
 	}
 
 	if rows.Err() != nil {
-        log.Fatalf("error rows query: %v",err)
+        log.Fatalf("Error with Query Rows: %v",err)
     }
 
     jsonResult, err := json.Marshal(dataGrants)
@@ -213,11 +205,27 @@ func Grants (w http.ResponseWriter, r *http.Request) {
 }
 
 func GrantsId(w http.ResponseWriter, r *http.Request)  {
+	if r.Method != "GET" {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	tokenStr := r.Header.Get("Authorization")
+	tokenStr = strings.TrimPrefix(tokenStr, "Bearer ")
+	
+	validToken, err := token.Validate(tokenStr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !validToken {
+		log.Fatal(err)
+	}
+
 	idString := r.PathValue("id")
 	
 	conn, err := pgx.Connect(ctx, dbConn)
 	if err != nil {
-		log.Fatalf("Unable to connect to database : %v\n", err)
+		log.Fatalf("Unable to connect to database: %v\n", err)
 	}
 	defer conn.Close(ctx)
 
@@ -234,7 +242,7 @@ func GrantsId(w http.ResponseWriter, r *http.Request)  {
 			&grant.FilterValues.CuttingOffCriteria,
 	)
 	if err != nil {
-		log.Fatalf("Error with queryRow: %v", err)
+		log.Fatalf("Error with query: %v", err)
 	}
 
 	query = "select age ->> 'title', amount ->> 'title' from filters_mapping"
@@ -242,7 +250,7 @@ func GrantsId(w http.ResponseWriter, r *http.Request)  {
 	var amount structs.Amount
 	err = conn.QueryRow(ctx, query).Scan(&age.Title, &amount.Title)
 	if err != nil {
-		log.Fatalf("Error queryrow: %v", err)
+		log.Fatalf("Error with query: %v", err)
 	}
 	ageS := structs.Age{
 		Title: age.Title,
@@ -255,7 +263,7 @@ func GrantsId(w http.ResponseWriter, r *http.Request)  {
 	var filter structs.DataGrants
 	err = conn.QueryRow(ctx, query).Scan(&filter.FiltersOrders)
 	if err != nil {
-		log.Fatalf("error queryrow: %v", err)
+		log.Fatalf("Error with query: %v", err)
 	}
 
 	var projDir structs.ProjectDirection
@@ -264,7 +272,7 @@ func GrantsId(w http.ResponseWriter, r *http.Request)  {
 	query = "select project_direction, legal_form, cutting_off_criteria from filters_mapping"
 	err = conn.QueryRow(ctx, query).Scan(&projDir, &legalForm, &cutOfCrit)
 	if err != nil {
-		log.Fatalf("Error queryrow: %v", err)
+		log.Fatalf("Error with query: %v", err)
 	}
 
 	filterMapping := structs.FiltersMapping{
@@ -283,7 +291,7 @@ func GrantsId(w http.ResponseWriter, r *http.Request)  {
 
 	jsonResult, err := json.Marshal(dataGrants)
 	if err != nil {
-		log.Fatalf("Error with marshall: %v", err)
+		log.Fatalf("Error with marshalling JSON: %v", err)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -291,10 +299,26 @@ func GrantsId(w http.ResponseWriter, r *http.Request)  {
 }
 
 func GrantsFilters(w http.ResponseWriter, r *http.Request)  {
+	if r.Method != "PUT" {
+		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	tokenStr := r.Header.Get("Authorization")
+	tokenStr = strings.TrimPrefix(tokenStr, "Bearer ")
+	
+	validToken, err := token.Validate(tokenStr)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if !validToken {
+		log.Fatal(err)
+	}
+
 	idString := r.PathValue("id")
 	idInt, err := strconv.Atoi(idString)
 	if err != nil {
-		log.Fatalf("Error with strconv %v", err)
+		log.Fatalf("Error with convertation in int %v", err)
 	}
 	
 	var respDataFilters structs.DataFilters
@@ -306,14 +330,14 @@ func GrantsFilters(w http.ResponseWriter, r *http.Request)  {
 	query := "UPDATE grants SET project_directions = $1, amount = $2, legal_forms = $3, age = $4, cutting_off_criterea = $5 where id = $6"
 	conn, err := pgx.Connect(ctx, dbConn)
 	if err != nil {
-		log.Fatalf("Error with database: %v", err)
+		log.Fatalf("Unable to connect to database: %v", err)
 	}
 	updateRow, err := conn.Exec(ctx, query, &respDataFilters.Data.ProjectDirection, &respDataFilters.Data.Amount, &respDataFilters.Data.LegalForm, &respDataFilters.Data.Age, &respDataFilters.Data.CuttingOffCriteria, idInt)
 	if err != nil {
-		log.Fatalf("Error with queryRow : %v", err)
+		log.Fatalf("Error with query: %v", err)
 	}
 	if updateRow.RowsAffected() != 1 {
-		log.Fatalf("No row found to updated")
+		log.Fatal("Not found row for update")
 	}
 
 	w.WriteHeader(http.StatusNoContent)
